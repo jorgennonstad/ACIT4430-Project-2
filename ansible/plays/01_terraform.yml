@@ -1,0 +1,15 @@
+- name: Run Terraform Infrastructure
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    - name: Terraform init
+      command: terraform init
+      args:
+        chdir: "{{ playbook_dir }}/../../terraform"
+
+    - name: Terraform apply
+      command: terraform apply -auto-approve
+      args:
+        chdir: "{{ playbook_dir }}/../../terraform"
+

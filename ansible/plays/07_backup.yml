@@ -1,0 +1,8 @@
+- name: Install Velero backup system
+  hosts: localhost
+
+  tasks:
+    - name: Install Velero
+      command: >
+        helm install velero vmware-tanzu/velero
+        -n velero --create-namespace

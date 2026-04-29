@@ -1,0 +1,7 @@
+- import_playbook: plays/01_terraform.yml
+- import_playbook: plays/02_prepare_nodes.yml
+- import_playbook: plays/03_kubespray.yml
+#- import_playbook: plays/04_ceph_rook.yml
+#- import_playbook: plays/05_monitoring.yml
+#- import_playbook: plays/06_logging.yml
+#- import_playbook: plays/07_backup.yml

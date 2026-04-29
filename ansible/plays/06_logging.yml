@@ -1,0 +1,11 @@
+- name: Deploy Loki Logging Stack
+  hosts: localhost
+
+  tasks:
+    - name: Add Grafana repo
+      command: helm repo add grafana https://grafana.github.io/helm-charts
+
+    - name: Install Loki
+      command: >
+        helm install loki grafana/loki-stack
+        -n logging --create-namespace

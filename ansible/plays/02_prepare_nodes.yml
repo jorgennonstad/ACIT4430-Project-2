@@ -1,0 +1,53 @@
+- name: Prepare all nodes for Kubernetes
+  hosts: all
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Wait for SSH to be ready
+      wait_for_connection:
+        delay: 5
+        timeout: 300
+      
+    - name: Ping all VMs
+      ping:
+    
+    - name: Add inspection key for ubuntu user
+      ansible.posix.authorized_key:
+        user: ubuntu
+        state: present
+        key: https://github.com/brunodzogovic.keys
+        
+    - name: Disable swap
+      command: swapoff -a
+
+    - name: Remove swap from fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^.*swap.*$'
+        replace: ''
+
+    - name: Load kernel modules for Kubernetes
+      modprobe:
+        name: "{{ item }}"
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Enable sysctl for Kubernetes networking
+      sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: 1
+        state: present
+        reload: true
+
+    - name: Update apt cache
+      apt:
+        update_cache: true
+
+    - name: Install base packages
+      apt:
+        name:
+          - python3-apt
+          - jed
+        state: present
