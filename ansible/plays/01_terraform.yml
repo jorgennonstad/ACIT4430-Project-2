@@ -13,3 +13,6 @@
       args:
         chdir: "{{ playbook_dir }}/../../terraform"
 
+    - name: Refresh inventory after Terraform
+      meta: refresh_inventory
+

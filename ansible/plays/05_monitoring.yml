@@ -1,11 +1,104 @@
-- name: Deploy Prometheus + Grafana
-  hosts: localhost
+- name: Install Observability Stack (CLEAN + SINGLE DATASOURCE + LOKI)
+  hosts: master
+  become: true
+  gather_facts: false
+
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
 
   tasks:
-    - name: Add Helm repo
-      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 
-    - name: Install kube-prometheus-stack
-      command: >
-        helm install monitoring prometheus-community/kube-prometheus-stack
-        -n monitoring --create-namespace
+    # ---------------- HELM INSTALL ----------------
+    - name: Install Helm (official script)
+      shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    # ---------------- REPOS ----------------
+    - name: Add Prometheus Helm repo
+      shell: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Add Grafana Helm repo
+      shell: helm repo add grafana https://grafana.github.io/helm-charts
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Update Helm repos
+      shell: helm repo update
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- CLEAN INSTALL ----------------
+    - name: Uninstall old monitoring release (clean slate)
+      shell: helm uninstall monitoring -n monitoring || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Remove stuck namespace resources
+      shell: kubectl delete ns monitoring --ignore-not-found=true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Recreate namespace
+      shell: kubectl create ns monitoring || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- INSTALL STACK ----------------
+    - name: Install Prometheus + Grafana + Loki stack
+      shell: |
+        helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+          --namespace monitoring \
+          --create-namespace \
+          \
+          --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=rook-ceph-block \
+          --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=10Gi \
+          \
+          --set grafana.persistence.enabled=true \
+          --set grafana.persistence.storageClassName=rook-ceph-block \
+          --set grafana.persistence.size=5Gi \
+          \
+          --set grafana.sidecar.datasources.enabled=false \
+          --set grafana.sidecar.dashboards.enabled=true \
+          \
+          --set grafana.datasources."datasources\.yaml".apiVersion=1 \
+          --set grafana.datasources."datasources\.yaml".datasources[0].name=Prometheus \
+          --set grafana.datasources."datasources\.yaml".datasources[0].type=prometheus \
+          --set grafana.datasources."datasources\.yaml".datasources[0].uid=prometheus \
+          --set grafana.datasources."datasources\.yaml".datasources[0].url=http://monitoring-kube-prometheus-prometheus.monitoring:9090 \
+          --set grafana.datasources."datasources\.yaml".datasources[0].access=proxy \
+          --set grafana.datasources."datasources\.yaml".datasources[0].isDefault=true \
+          \
+          --set grafana.datasources."datasources\.yaml".datasources[1].name=Loki \
+          --set grafana.datasources."datasources\.yaml".datasources[1].type=loki \
+          --set grafana.datasources."datasources\.yaml".datasources[1].uid=loki \
+          --set grafana.datasources."datasources\.yaml".datasources[1].url=http://loki.monitoring.svc.cluster.local:3100 \
+          --set grafana.datasources."datasources\.yaml".datasources[1].access=proxy
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- LOKI STACK ----------------
+    - name: Install Loki stack
+      shell: |
+        helm upgrade --install loki grafana/loki-stack \
+          --namespace monitoring \
+          --set persistence.enabled=true \
+          --set persistence.storageClassName=rook-ceph-block \
+          --set persistence.size=5Gi
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- VERIFY ----------------
+    - name: Check monitoring pods
+      shell: kubectl get pods -n monitoring
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: monitoring_pods
+      changed_when: false
+
+    - name: Print monitoring status
+      debug:
+        var: monitoring_pods.stdout_lines

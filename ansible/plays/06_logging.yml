@@ -9,3 +9,4 @@
       command: >
         helm install loki grafana/loki-stack
         -n logging --create-namespace
+        

@@ -1,0 +1,12 @@
+# Registry mirrors and optional auth for containerd
+containerd_registries_mirrors:
+  docker.io:
+    endpoint:
+      - "https://registry-1.docker.io"
+
+# If you want Kubespray to configure node-level auth, place
+# credentials here. Prefer using Ansible Vault instead of plain text.
+containerd_registries_auth:
+  docker.io:
+    username: "jorgennonstad"
+    password: "dockerPassword123"

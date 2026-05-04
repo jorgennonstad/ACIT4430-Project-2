@@ -7,20 +7,31 @@
   vars:
     kubeconfig: /etc/kubernetes/admin.conf
     rook_version: v1.19.4
+    rook_examples_base: https://raw.githubusercontent.com/rook/rook/{{ rook_version }}/deploy/examples
 
   tasks:
     - name: Install Rook operator resources
       shell: |
-        kubectl apply -f https://raw.githubusercontent.com/rook/rook/{{ rook_version }}/deploy/examples/crds.yaml
-        kubectl apply -f https://raw.githubusercontent.com/rook/rook/{{ rook_version }}/deploy/examples/common.yaml
-        kubectl apply -f https://raw.githubusercontent.com/rook/rook/{{ rook_version }}/deploy/examples/csi-operator.yaml
-        kubectl apply -f https://raw.githubusercontent.com/rook/rook/{{ rook_version }}/deploy/examples/operator.yaml
+        kubectl apply -f {{ rook_examples_base }}/crds.yaml
+        kubectl apply -f {{ rook_examples_base }}/common.yaml
+        kubectl apply -f {{ rook_examples_base }}/csi-operator.yaml
+        kubectl apply -f {{ rook_examples_base }}/operator.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    - name: Create Ceph cluster config
+    - name: Wait for rook-ceph-operator to be running
+      shell: kubectl -n rook-ceph get pod
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: rook_operator
+      retries: 20
+      delay: 15
+      until: "'rook-ceph-operator' in rook_operator.stdout and 'Running' in rook_operator.stdout"
+      changed_when: false
+
+    - name: Copy custom Ceph cluster manifest
       copy:
-        dest: /tmp/ceph-cluster.yaml
+        dest: /tmp/rook-cluster.yaml
         content: |
           apiVersion: ceph.rook.io/v1
           kind: CephCluster
@@ -28,6 +39,9 @@
             name: rook-ceph
             namespace: rook-ceph
           spec:
+            cephVersion:
+              image: quay.io/ceph/ceph:v19.2.3
+              allowUnsupported: false
             dataDirHostPath: /var/lib/rook
             mon:
               count: 3
@@ -45,50 +59,105 @@
                   devices:
                     - name: sdb
 
-    - name: Apply Ceph cluster
-      shell: kubectl apply -f /tmp/ceph-cluster.yaml
+    - name: Apply custom Ceph cluster
+      shell: kubectl apply -f /tmp/rook-cluster.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    - name: Create block pool and storage class
-      copy:
-        dest: /tmp/rook-storage.yaml
-        content: |
-          apiVersion: ceph.rook.io/v1
-          kind: CephBlockPool
-          metadata:
-            name: replicapool
-            namespace: rook-ceph
-          spec:
-            failureDomain: host
-            replicated:
-              size: 3
-          ---
-          apiVersion: storage.k8s.io/v1
-          kind: StorageClass
-          metadata:
-            name: rook-ceph-block
-          provisioner: rook-ceph.rbd.csi.ceph.com
-          parameters:
-            clusterID: rook-ceph
-            pool: replicapool
-            imageFeatures: layering
-            csi.storage.k8s.io/provisioner-secret-name: rook-csi-rbd-provisioner
-            csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
-            csi.storage.k8s.io/controller-expand-secret-name: rook-csi-rbd-provisioner
-            csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
-            csi.storage.k8s.io/controller-publish-secret-name: rook-csi-rbd-provisioner
-            csi.storage.k8s.io/controller-publish-secret-namespace: rook-ceph
-            csi.storage.k8s.io/node-stage-secret-name: rook-csi-rbd-node
-            csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
-            csi.storage.k8s.io/fstype: ext4
-          reclaimPolicy: Delete
-          allowVolumeExpansion: true
+    - name: Wait for CephCluster to become healthy
+      shell: kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.health}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: ceph_health
+      retries: 30
+      delay: 20
+      until: ceph_health.stdout == "HEALTH_OK"
+      changed_when: false
 
     - name: Apply block pool and storage class
-      shell: kubectl apply -f /tmp/rook-storage.yaml
+      shell: kubectl apply -f "{{ rook_examples_base }}/csi/rbd/storageclass.yaml"
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Create test PVC and pod manifest
+      copy:
+        dest: /tmp/ceph-test.yaml
+        content: |
+          apiVersion: v1
+          kind: PersistentVolumeClaim
+          metadata:
+            name: ceph-test-pvc
+          spec:
+            accessModes:
+              - ReadWriteOnce
+            storageClassName: rook-ceph-block
+            resources:
+              requests:
+                storage: 1Gi
+          ---
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ceph-test-pod
+          spec:
+            containers:
+              - name: app
+                image: busybox
+                command: ["/bin/sh", "-c", "echo hello-from-ceph > /data/test.txt && sleep 3600"]
+                volumeMounts:
+                  - name: ceph-storage
+                    mountPath: /data
+            volumes:
+              - name: ceph-storage
+                persistentVolumeClaim:
+                  claimName: ceph-test-pvc
+
+    - name: Apply test PVC and pod
+      shell: kubectl apply -f /tmp/ceph-test.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for PVC to be Bound
+      shell: kubectl get pvc ceph-test-pvc -o jsonpath='{.status.phase}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pvc_phase
+      retries: 20
+      delay: 10
+      until: pvc_phase.stdout == "Bound"
+      changed_when: false
+
+    - name: Wait for test pod to be Running
+      shell: kubectl get pod ceph-test-pod -o jsonpath='{.status.phase}'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pod_phase
+      retries: 20
+      delay: 10
+      until: pod_phase.stdout == "Running"
+      changed_when: false
+
+    - name: Check PVC status
+      shell: kubectl get pvc ceph-test-pvc
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pvc_status
+      changed_when: false
+
+    - name: Print PVC status
+      debug:
+        var: pvc_status.stdout_lines
+
+    - name: Check pod status
+      shell: kubectl get pod ceph-test-pod
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: pod_status
+      changed_when: false
+
+    - name: Print pod status
+      debug:
+        var: pod_status.stdout_lines
 
     - name: Show Rook pods
       shell: kubectl -n rook-ceph get pod

@@ -1,0 +1,9 @@
+- name: Cleanup Terraform Infrastructure
+	hosts: localhost
+	gather_facts: false
+
+	tasks:
+		- name: Destroy master and worker nodes
+			command: terraform destroy -auto-approve
+			args:
+				chdir: "{{ playbook_dir }}/../../terraform"

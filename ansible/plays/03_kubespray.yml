@@ -5,12 +5,53 @@
   vars:
     kubespray_dir: "{{ playbook_dir }}/../../kubespray"
     venv_path: "{{ kubespray_dir }}/venv"
+    source_inventory: "{{ playbook_dir }}/../inventory/inventory"
+    source_containerd: "{{ playbook_dir }}/../inventory/group_vars/all/containerd.yml"
+    kubespray_inventory_dir: "{{ kubespray_dir }}/inventory/mycluster"
+    kubespray_hosts_file: "{{ kubespray_inventory_dir }}/hosts.yml"
+    kubespray_containerd_file: "{{ kubespray_inventory_dir }}/group_vars/all/containerd.yml"
 
   tasks:
+    - name: Seed Kubespray inventory from sample
+      command: cp -rpn inventory/sample/. inventory/mycluster/
+      args:
+        chdir: "{{ kubespray_dir }}"
+
+    - name: Copy generated cluster inventory to Kubespray hosts.yml
+      copy:
+        src: "{{ source_inventory }}"
+        dest: "{{ kubespray_hosts_file }}"
+        remote_src: true
+
+    - name: Check whether containerd override exists
+      stat:
+        path: "{{ source_containerd }}"
+      register: containerd_override
+
+    - name: Ensure Kubespray group_vars/all exists
+      file:
+        path: "{{ kubespray_inventory_dir }}/group_vars/all"
+        state: directory
+
+    - name: Copy containerd override into Kubespray inventory
+      copy:
+        src: "{{ source_containerd }}"
+        dest: "{{ kubespray_containerd_file }}"
+        remote_src: true
+      when: containerd_override.stat.exists
+
+    - name: Remove existing virtualenv (if present)
+      file:
+        path: "{{ venv_path }}"
+        state: absent
+
     - name: Create virtualenv
       command: python3 -m venv {{ venv_path }}
+
+    - name: Install requirements
+      command: "{{ venv_path }}/bin/pip install -r requirements.txt"
       args:
-        creates: "{{ venv_path }}/bin/activate"
+        chdir: "{{ kubespray_dir }}"
 
     - name: Install requirements
       command: "{{ venv_path }}/bin/pip install -r requirements.txt"
@@ -20,7 +61,7 @@
     - name: Run Kubespray with venv
       command: >
         {{ venv_path }}/bin/ansible-playbook
-        -i ../ansible/inventory/inventory
+        -i inventory/mycluster/hosts.yml
         cluster.yml
       args:
         chdir: "{{ kubespray_dir }}"
