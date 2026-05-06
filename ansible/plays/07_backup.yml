@@ -1,8 +1,283 @@
-- name: Install Velero backup system
-  hosts: localhost
+---
+- name: Install Backup System with Veeam Kasten K10
+  hosts: master
+  become: true
+  gather_facts: false
+
+  vars:
+    kubeconfig: /etc/kubernetes/admin.conf
+
+    # Kasten settings
+    kasten_namespace: kasten-io
+    kasten_release_name: k10
+    kasten_chart: kasten/k10
+    kasten_version: "8.5.8"
+
+    # Rook-Ceph storage
+    kasten_storage_class: rook-ceph-block
+    rook_namespace: rook-ceph
+    rook_rbd_snapshotclass: rook-ceph-block-snapclass
+
+    # Snapshot controller version
+    snapshotter_version: v8.2.0
+
+    # Kasten signing key
+    kasten_key_path: /tmp/RPM-KASTEN
+
+    # Namespaces to protect with simple Kasten policies
+    backup_namespaces:
+      - default
+      - monitoring
+      - logging
 
   tasks:
-    - name: Install Velero
-      command: >
-        helm install velero vmware-tanzu/velero
-        -n velero --create-namespace
+    # ---------------- HELM INSTALL ----------------
+    - name: Install Helm
+      ansible.builtin.shell: |
+        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Show Helm version
+      ansible.builtin.shell: helm version --short
+      register: helm_version
+      changed_when: false
+
+    - name: Print Helm version
+      ansible.builtin.debug:
+        var: helm_version.stdout_lines
+
+    # ---------------- KASTEN HELM REPO ----------------
+    - name: Add Kasten Helm repo
+      ansible.builtin.shell: helm repo add kasten https://charts.kasten.io/ || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Update Helm repos
+      ansible.builtin.shell: helm repo update
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- KASTEN CHART SIGNING KEY ----------------
+    - name: Download Kasten Helm chart public signing key
+      ansible.builtin.get_url:
+        url: https://repository.veeam.com/keys/RPM-KASTEN
+        dest: "{{ kasten_key_path }}"
+        mode: "0644"
+
+    - name: Verify Kasten chart provenance before installation
+      ansible.builtin.command:
+        argv:
+          - helm
+          - pull
+          - --prov
+          - "{{ kasten_chart }}"
+          - --version
+          - "{{ kasten_version }}"
+          - --verify
+          - --keyring
+          - "{{ kasten_key_path }}"
+          - --destination
+          - /tmp
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: kasten_chart_verify
+      changed_when: false
+
+    - name: Print Kasten chart verification result
+      ansible.builtin.debug:
+        var: kasten_chart_verify.stdout_lines
+
+    # ---------------- NAMESPACE ----------------
+    - name: Create Kasten namespace
+      ansible.builtin.shell: kubectl create namespace {{ kasten_namespace }} || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Label backup namespaces for Kasten application discovery
+      ansible.builtin.shell: >
+        kubectl label namespace {{ item }}
+        k10.kasten.io/appNamespace={{ item }}
+        --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop: "{{ backup_namespaces }}"
+
+    # ---------------- PRE-FLIGHT CHECK ----------------
+    - name: Run Kasten pre-flight checks
+      ansible.builtin.shell: |
+        curl -fsSL https://docs.kasten.io/downloads/{{ kasten_version }}/tools/k10_primer.sh | bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: kasten_primer
+      changed_when: false
+
+    - name: Print Kasten pre-flight check result
+      ansible.builtin.debug:
+        var: kasten_primer.stdout_lines
+
+    # ---------------- SNAPSHOT CRDS + CONTROLLER ----------------
+    - name: Install VolumeSnapshot CRDs
+      ansible.builtin.shell: |
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/{{ snapshotter_version }}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/{{ snapshotter_version }}/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/{{ snapshotter_version }}/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Install snapshot controller
+      ansible.builtin.shell: |
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/{{ snapshotter_version }}/deploy/kubernetes/snapshot-controller/rbac-snapshot-controller.yaml
+        kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/{{ snapshotter_version }}/deploy/kubernetes/snapshot-controller/setup-snapshot-controller.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- ROOK-CEPH SNAPSHOT CLASS ----------------
+    - name: Create Rook-Ceph RBD VolumeSnapshotClass manifest
+      ansible.builtin.copy:
+        dest: /tmp/rook-ceph-rbd-snapshotclass.yaml
+        content: |
+          apiVersion: snapshot.storage.k8s.io/v1
+          kind: VolumeSnapshotClass
+          metadata:
+            name: {{ rook_rbd_snapshotclass }}
+            annotations:
+              k10.kasten.io/is-snapshot-class: "true"
+          driver: rook-ceph.rbd.csi.ceph.com
+          parameters:
+            clusterID: {{ rook_namespace }}
+            csi.storage.k8s.io/snapshotter-secret-name: rook-csi-rbd-provisioner
+            csi.storage.k8s.io/snapshotter-secret-namespace: {{ rook_namespace }}
+          deletionPolicy: Delete
+
+    - name: Apply Rook-Ceph RBD VolumeSnapshotClass
+      ansible.builtin.shell: kubectl apply -f /tmp/rook-ceph-rbd-snapshotclass.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Connect Rook-Ceph StorageClass to Kasten snapshot class
+      ansible.builtin.shell: >
+        kubectl annotate storageclass {{ kasten_storage_class }}
+        k10.kasten.io/volume-snapshot-class={{ rook_rbd_snapshotclass }}
+        --overwrite
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    # ---------------- INSTALL KASTEN K10 ----------------
+    - name: Install Kasten K10 with verified Helm chart
+      ansible.builtin.command:
+        argv:
+          - helm
+          - upgrade
+          - --install
+          - "{{ kasten_release_name }}"
+          - "{{ kasten_chart }}"
+          - --namespace
+          - "{{ kasten_namespace }}"
+          - --create-namespace
+          - --version
+          - "{{ kasten_version }}"
+          - --verify
+          - --keyring
+          - "{{ kasten_key_path }}"
+          - --set
+          - "global.persistence.storageClass={{ kasten_storage_class }}"
+          - --set
+          - "auth.tokenAuth.enabled=true"
+          - --set
+          - "rbac.create=true"
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Wait for Kasten deployments to become available
+      ansible.builtin.shell: >
+        kubectl -n {{ kasten_namespace }}
+        wait --for=condition=Available deployment --all --timeout=600s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+
+    # ---------------- BACKUP POLICIES ----------------
+    - name: Create Kasten backup policy manifests
+      ansible.builtin.copy:
+        dest: "/tmp/kasten-policy-{{ item }}.yaml"
+        content: |
+          apiVersion: config.kio.kasten.io/v1alpha1
+          kind: Policy
+          metadata:
+            name: backup-{{ item }}
+            namespace: {{ kasten_namespace }}
+          spec:
+            comment: "Daily backup policy for namespace {{ item }}"
+            frequency: "@daily"
+            retention:
+              daily: 7
+              weekly: 4
+            actions:
+              - action: backup
+            selector:
+              matchLabels:
+                k10.kasten.io/appNamespace: {{ item }}
+      loop: "{{ backup_namespaces }}"
+
+    - name: Apply Kasten backup policies
+      ansible.builtin.shell: kubectl apply -f /tmp/kasten-policy-{{ item }}.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      loop: "{{ backup_namespaces }}"
+
+    # ---------------- VERIFY ----------------
+    - name: Show Kasten pods
+      ansible.builtin.shell: kubectl get pods -n {{ kasten_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: kasten_pods
+      changed_when: false
+
+    - name: Print Kasten pod status
+      ansible.builtin.debug:
+        var: kasten_pods.stdout_lines
+
+    - name: Show Kasten PVCs
+      ansible.builtin.shell: kubectl get pvc -n {{ kasten_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: kasten_pvcs
+      changed_when: false
+
+    - name: Print Kasten PVC status
+      ansible.builtin.debug:
+        var: kasten_pvcs.stdout_lines
+
+    - name: Show VolumeSnapshotClasses
+      ansible.builtin.shell: kubectl get volumesnapshotclass
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: snapshotclasses
+      changed_when: false
+
+    - name: Print VolumeSnapshotClass status
+      ansible.builtin.debug:
+        var: snapshotclasses.stdout_lines
+
+    - name: Show Kasten backup policies
+      ansible.builtin.shell: kubectl get policies.config.kio.kasten.io -n {{ kasten_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: kasten_policies
+      changed_when: false
+
+    - name: Print Kasten policy status
+      ansible.builtin.debug:
+        var: kasten_policies.stdout_lines
+
+    - name: Show dashboard access instructions
+      ansible.builtin.debug:
+        msg:
+          - "Kasten K10 is installed in namespace {{ kasten_namespace }}."
+          - "To access the Kasten dashboard, run this on the Kubernetes master:"
+          - "sudo KUBECONFIG={{ kubeconfig }} kubectl --namespace {{ kasten_namespace }} port-forward service/gateway 8080:80"
+          - "Then open this from the machine where the port-forward runs:"
+          - "http://127.0.0.1:8080/k10/#/"
+          - "To create a login token, run:"
+          - "sudo KUBECONFIG={{ kubeconfig }} kubectl --namespace {{ kasten_namespace }} create token {{ kasten_release_name }}-{{ kasten_release_name }} --duration=24h"

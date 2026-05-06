@@ -1,3 +1,4 @@
+---
 - name: Prepare all nodes for Kubernetes
   hosts: all
   gather_facts: false
@@ -8,16 +9,16 @@
       wait_for_connection:
         delay: 5
         timeout: 300
-      
+
     - name: Ping all VMs
       ping:
-    
+
     - name: Add inspection key for ubuntu user
       ansible.posix.authorized_key:
         user: ubuntu
         state: present
-        key: https://github.com/brunodzogovic.keys
-        
+        key: "{{ lookup('url', 'https://github.com/brunodzogovic.keys') }}"
+
     - name: Disable swap
       command: swapoff -a
 
@@ -50,4 +51,40 @@
         name:
           - python3-apt
           - jed
+          - gdisk
+          - parted
         state: present
+
+
+- name: Wipe old Ceph data from worker storage disks
+  hosts: kube_node
+  gather_facts: false
+  become: true
+
+  vars:
+    ceph_disk: /dev/sdb
+
+  tasks:
+    - name: Check that Ceph disk exists
+      stat:
+        path: "{{ ceph_disk }}"
+      register: ceph_disk_stat
+
+    - name: Fail if Ceph disk does not exist
+      fail:
+        msg: "{{ ceph_disk }} does not exist on {{ inventory_hostname }}. Check the OpenStack volume attachment or disk name."
+      when: not ceph_disk_stat.stat.exists
+
+    - name: Wipe filesystem signatures from Ceph disk
+      command: "wipefs -a {{ ceph_disk }}"
+
+    - name: Zap partition table from Ceph disk
+      command: "sgdisk --zap-all {{ ceph_disk }}"
+      ignore_errors: true
+
+    - name: Clear first 100MB of Ceph disk
+      command: "dd if=/dev/zero of={{ ceph_disk }} bs=1M count=100 oflag=direct"
+
+    - name: Refresh partition table
+      command: "partprobe {{ ceph_disk }}"
+      ignore_errors: true
