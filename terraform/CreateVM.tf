@@ -42,6 +42,7 @@ resource "openstack_compute_instance_v2" "worker" {
 # ---------------- CEPh DISKS ----------------
 resource "openstack_blockstorage_volume_v3" "worker_disk" {
   count = 3
+  name  = "worker-${count.index + 1}-ceph-disk"
   size  = 20
 }
 

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ ceph_test_pvc_name }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ storage_class }}
+  resources:
+    requests:
+      storage: {{ ceph_test_pvc_size }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ ceph_test_pod_name }}
+spec:
+  containers:
+    - name: app
+      image: busybox
+      command:
+        - /bin/sh
+        - -c
+        - echo hello-from-ceph > /data/test.txt && sleep 3600
+      volumeMounts:
+        - name: ceph-storage
+          mountPath: /data
+  volumes:
+    - name: ceph-storage
+      persistentVolumeClaim:
+        claimName: {{ ceph_test_pvc_name }}

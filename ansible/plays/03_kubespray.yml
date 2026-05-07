@@ -53,11 +53,6 @@
       args:
         chdir: "{{ kubespray_dir }}"
 
-    - name: Install requirements
-      command: "{{ venv_path }}/bin/pip install -r requirements.txt"
-      args:
-        chdir: "{{ kubespray_dir }}"
-
     - name: Run Kubespray with venv
       command: >
         {{ venv_path }}/bin/ansible-playbook

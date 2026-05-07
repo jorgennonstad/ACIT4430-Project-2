@@ -1,0 +1,21 @@
+apiVersion: ceph.rook.io/v1
+kind: CephCluster
+metadata:
+  name: {{ ceph_cluster_name }}
+  namespace: {{ rook_namespace }}
+spec:
+  cephVersion:
+    image: {{ ceph_image }}
+    allowUnsupported: false
+  dataDirHostPath: {{ ceph_data_dir_host_path }}
+  mon:
+    count: {{ ceph_mon_count }}
+  storage:
+    useAllNodes: false
+    useAllDevices: false
+    nodes:
+{% for node in ceph_storage_nodes %}
+      - name: {{ node.name }}
+        devices:
+          - name: {{ node.device }}
+{% endfor %}

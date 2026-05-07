@@ -56,7 +56,7 @@
         state: present
 
 
-- name: Wipe old Ceph data from worker storage disks
+- name: Prepare worker storage disks for Ceph
   hosts: kube_node
   gather_facts: false
   become: true

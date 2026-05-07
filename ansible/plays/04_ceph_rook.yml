@@ -6,12 +6,33 @@
 
   vars:
     kubeconfig: /etc/kubernetes/admin.conf
+
+    rook_namespace: rook-ceph
     rook_version: v1.19.4
     rook_examples_base: https://raw.githubusercontent.com/rook/rook/{{ rook_version }}/deploy/examples
 
+    ceph_cluster_name: rook-ceph
+    ceph_image: quay.io/ceph/ceph:v19.2.3
+    ceph_data_dir_host_path: /var/lib/rook
+    ceph_mon_count: 3
+
+    storage_class: rook-ceph-block
+
+    ceph_storage_nodes:
+      - name: worker-1
+        device: sdb
+      - name: worker-2
+        device: sdb
+      - name: worker-3
+        device: sdb
+
+    ceph_test_pvc_name: ceph-test-pvc
+    ceph_test_pod_name: ceph-test-pod
+    ceph_test_pvc_size: 1Gi
+
   tasks:
     - name: Install Rook operator resources
-      shell: |
+      ansible.builtin.shell: |
         kubectl apply -f {{ rook_examples_base }}/crds.yaml
         kubectl apply -f {{ rook_examples_base }}/common.yaml
         kubectl apply -f {{ rook_examples_base }}/csi-operator.yaml
@@ -20,7 +41,7 @@
         KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Wait for rook-ceph-operator to be running
-      shell: kubectl -n rook-ceph get pod
+      ansible.builtin.shell: kubectl -n {{ rook_namespace }} get pod
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       register: rook_operator
@@ -29,43 +50,18 @@
       until: "'rook-ceph-operator' in rook_operator.stdout and 'Running' in rook_operator.stdout"
       changed_when: false
 
-    - name: Copy custom Ceph cluster manifest
-      copy:
+    - name: Create custom Ceph cluster manifest from template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/rook-cluster.yaml.j2"
         dest: /tmp/rook-cluster.yaml
-        content: |
-          apiVersion: ceph.rook.io/v1
-          kind: CephCluster
-          metadata:
-            name: rook-ceph
-            namespace: rook-ceph
-          spec:
-            cephVersion:
-              image: quay.io/ceph/ceph:v19.2.3
-              allowUnsupported: false
-            dataDirHostPath: /var/lib/rook
-            mon:
-              count: 3
-            storage:
-              useAllNodes: false
-              useAllDevices: false
-              nodes:
-                - name: worker-1
-                  devices:
-                    - name: sdb
-                - name: worker-2
-                  devices:
-                    - name: sdb
-                - name: worker-3
-                  devices:
-                    - name: sdb
 
     - name: Apply custom Ceph cluster
-      shell: kubectl apply -f /tmp/rook-cluster.yaml
+      ansible.builtin.shell: kubectl apply -f /tmp/rook-cluster.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Wait for CephCluster to become healthy
-      shell: kubectl -n rook-ceph get cephcluster rook-ceph -o jsonpath='{.status.ceph.health}'
+      ansible.builtin.shell: kubectl -n {{ rook_namespace }} get cephcluster {{ ceph_cluster_name }} -o jsonpath='{.status.ceph.health}'
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       register: ceph_health
@@ -75,50 +71,22 @@
       changed_when: false
 
     - name: Apply block pool and storage class
-      shell: kubectl apply -f "{{ rook_examples_base }}/csi/rbd/storageclass.yaml"
+      ansible.builtin.shell: kubectl apply -f "{{ rook_examples_base }}/csi/rbd/storageclass.yaml"
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    - name: Create test PVC and pod manifest
-      copy:
+    - name: Create test PVC and pod manifest from template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/ceph-test.yaml.j2"
         dest: /tmp/ceph-test.yaml
-        content: |
-          apiVersion: v1
-          kind: PersistentVolumeClaim
-          metadata:
-            name: ceph-test-pvc
-          spec:
-            accessModes:
-              - ReadWriteOnce
-            storageClassName: rook-ceph-block
-            resources:
-              requests:
-                storage: 1Gi
-          ---
-          apiVersion: v1
-          kind: Pod
-          metadata:
-            name: ceph-test-pod
-          spec:
-            containers:
-              - name: app
-                image: busybox
-                command: ["/bin/sh", "-c", "echo hello-from-ceph > /data/test.txt && sleep 3600"]
-                volumeMounts:
-                  - name: ceph-storage
-                    mountPath: /data
-            volumes:
-              - name: ceph-storage
-                persistentVolumeClaim:
-                  claimName: ceph-test-pvc
 
     - name: Apply test PVC and pod
-      shell: kubectl apply -f /tmp/ceph-test.yaml
+      ansible.builtin.shell: kubectl apply -f /tmp/ceph-test.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Wait for PVC to be Bound
-      shell: kubectl get pvc ceph-test-pvc -o jsonpath='{.status.phase}'
+      ansible.builtin.shell: kubectl get pvc {{ ceph_test_pvc_name }} -o jsonpath='{.status.phase}'
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       register: pvc_phase
@@ -128,7 +96,7 @@
       changed_when: false
 
     - name: Wait for test pod to be Running
-      shell: kubectl get pod ceph-test-pod -o jsonpath='{.status.phase}'
+      ansible.builtin.shell: kubectl get pod {{ ceph_test_pod_name }} -o jsonpath='{.status.phase}'
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
       register: pod_phase
@@ -137,35 +105,27 @@
       until: pod_phase.stdout == "Running"
       changed_when: false
 
-    - name: Check PVC status
-      shell: kubectl get pvc ceph-test-pvc
+    - name: Show Ceph status
+      ansible.builtin.shell: |
+        echo "=== CephCluster ==="
+        kubectl -n {{ rook_namespace }} get cephcluster
+        echo ""
+        echo "=== Rook pods ==="
+        kubectl -n {{ rook_namespace }} get pods
+        echo ""
+        echo "=== StorageClass ==="
+        kubectl get storageclass {{ storage_class }}
+        echo ""
+        echo "=== Test PVC ==="
+        kubectl get pvc {{ ceph_test_pvc_name }}
+        echo ""
+        echo "=== Test pod ==="
+        kubectl get pod {{ ceph_test_pod_name }}
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
-      register: pvc_status
+      register: ceph_status
       changed_when: false
 
-    - name: Print PVC status
-      debug:
-        var: pvc_status.stdout_lines
-
-    - name: Check pod status
-      shell: kubectl get pod ceph-test-pod
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      register: pod_status
-      changed_when: false
-
-    - name: Print pod status
-      debug:
-        var: pod_status.stdout_lines
-
-    - name: Show Rook pods
-      shell: kubectl -n rook-ceph get pod
-      environment:
-        KUBECONFIG: "{{ kubeconfig }}"
-      register: rook_pods
-      changed_when: false
-
-    - name: Print Rook pod status
-      debug:
-        var: rook_pods.stdout_lines
+    - name: Print Ceph status
+      ansible.builtin.debug:
+        var: ceph_status.stdout_lines

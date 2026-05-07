@@ -1,4 +1,5 @@
-- name: Install Logging Stack (Loki + Promtail)
+---
+- name: Install Logging Stack (Loki + Grafana Alloy)
   hosts: master
   become: true
   gather_facts: false
@@ -6,86 +7,114 @@
   vars:
     kubeconfig: /etc/kubernetes/admin.conf
 
-  tasks:
-    # ---------------- HELM INSTALL ----------------
-    - name: Install Helm
-      shell: |
-        curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-      args:
-        creates: /usr/local/bin/helm
+    logging_namespace: logging
+    monitoring_namespace: monitoring
+    storage_class: rook-ceph-block
+    cluster_name: acit4430-project2
 
-    # ---------------- REPOS ----------------
+  tasks:
     - name: Add Grafana Helm repo
-      shell: helm repo add grafana https://grafana.github.io/helm-charts || true
+      ansible.builtin.shell: helm repo add grafana https://grafana.github.io/helm-charts || true
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Add Grafana Community Helm repo
+      ansible.builtin.shell: helm repo add grafana-community https://grafana-community.github.io/helm-charts || true
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Update Helm repos
-      shell: helm repo update
+      ansible.builtin.shell: helm repo update
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    # ---------------- LOGGING STACK ----------------
-    - name: Install Loki and Promtail
-      shell: |
-        helm upgrade --install loki grafana/loki-stack \
-          --namespace logging \
-          --create-namespace \
-          --set loki.persistence.enabled=true \
-          --set loki.persistence.storageClassName=rook-ceph-block \
-          --set loki.persistence.size=5Gi \
-          --set promtail.enabled=true \
-          --set grafana.enabled=false
+    - name: Create logging namespace
+      ansible.builtin.shell: kubectl create namespace {{ logging_namespace }} || true
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    # ---------------- GRAFANA LOKI DATASOURCE ----------------
-    - name: Add Loki datasource to Grafana
-      copy:
+    - name: Copy Loki values file
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/loki-values.yaml.j2"
+        dest: /tmp/loki-values.yaml
+
+    - name: Copy Alloy values file
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/alloy-values.yaml.j2"
+        dest: /tmp/alloy-values.yaml
+
+    - name: Install Loki
+      ansible.builtin.shell: |
+        helm upgrade --install loki grafana-community/loki \
+          --namespace {{ logging_namespace }} \
+          --values /tmp/loki-values.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Install Grafana Alloy
+      ansible.builtin.shell: |
+        helm upgrade --install alloy grafana/alloy \
+          --namespace {{ logging_namespace }} \
+          --values /tmp/alloy-values.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+
+    - name: Create Loki datasource manifest for Grafana
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/grafana-loki-datasource.yaml.j2"
         dest: /tmp/grafana-loki-datasource.yaml
-        content: |
-          apiVersion: v1
-          kind: ConfigMap
-          metadata:
-            name: grafana-loki-datasource
-            namespace: monitoring
-            labels:
-              grafana_datasource: "1"
-          data:
-            loki-datasource.yaml: |
-              apiVersion: 1
-              datasources:
-                - name: Loki
-                  type: loki
-                  uid: loki
-                  access: proxy
-                  url: http://loki.logging.svc.cluster.local:3100
-                  isDefault: false
 
     - name: Apply Loki datasource ConfigMap
-      shell: kubectl apply -f /tmp/grafana-loki-datasource.yaml
+      ansible.builtin.shell: kubectl apply -f /tmp/grafana-loki-datasource.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    # ---------------- VERIFY ----------------
-    - name: Check logging pods
-      shell: kubectl get pods -n logging
+    - name: Wait for Loki StatefulSet to be ready
+      ansible.builtin.shell: kubectl -n {{ logging_namespace }} rollout status statefulset/loki --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
-      register: logging_pods
       changed_when: false
 
-    - name: Print logging pod status
-      debug:
-        var: logging_pods.stdout_lines
-
-    - name: Check logging PVCs
-      shell: kubectl get pvc -n logging
+    - name: Wait for Alloy DaemonSet to be ready
+      ansible.builtin.shell: kubectl -n {{ logging_namespace }} rollout status daemonset/alloy --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
-      register: logging_pvcs
       changed_when: false
 
-    - name: Print logging PVC status
-      debug:
-        var: logging_pvcs.stdout_lines
+    - name: Wait for Grafana to be ready
+      ansible.builtin.shell: kubectl -n {{ monitoring_namespace }} rollout status deployment/monitoring-grafana --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      changed_when: false
+
+    - name: Check logging status
+      ansible.builtin.shell: |
+        echo "=== Pods ==="
+        kubectl get pods -n {{ logging_namespace }}
+        echo ""
+        echo "=== Services ==="
+        kubectl get svc -n {{ logging_namespace }}
+        echo ""
+        echo "=== PVCs ==="
+        kubectl get pvc -n {{ logging_namespace }}
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: logging_status
+      changed_when: false
+
+    - name: Print logging status
+      ansible.builtin.debug:
+        var: logging_status.stdout_lines
+
+    - name: Test Loki readiness from Grafana pod
+      ansible.builtin.shell: |
+        kubectl -n {{ monitoring_namespace }} exec deploy/monitoring-grafana -c grafana -- \
+          sh -c 'wget -qO- http://loki.{{ logging_namespace }}.svc.cluster.local:3100/ready'
+      environment:
+        KUBECONFIG: "{{ kubeconfig }}"
+      register: loki_ready
+      changed_when: false
+
+    - name: Print Loki readiness result
+      ansible.builtin.debug:
+        var: loki_ready.stdout_lines

@@ -1,3 +1,4 @@
+---
 - name: Install Monitoring Stack (Prometheus + Grafana)
   hosts: master
   become: true
@@ -6,60 +7,72 @@
   vars:
     kubeconfig: /etc/kubernetes/admin.conf
 
+    monitoring_namespace: monitoring
+    storage_class: rook-ceph-block
+
+    prometheus_storage_size: 10Gi
+
+    grafana_storage_size: 5Gi
+    grafana_nodeport: 30080
+    grafana_admin_user: admin
+    grafana_admin_password: admin
+
   tasks:
-    # ---------------- HELM INSTALL ----------------
     - name: Install Helm
-      shell: |
+      ansible.builtin.shell: |
         curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
       args:
         creates: /usr/local/bin/helm
 
-    # ---------------- REPOS ----------------
     - name: Add Prometheus Helm repo
-      shell: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
+      ansible.builtin.shell: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts || true
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
     - name: Update Helm repos
-      shell: helm repo update
+      ansible.builtin.shell: helm repo update
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    # ---------------- MONITORING STACK ----------------
+    - name: Create monitoring values file from template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/monitoring-values.yaml.j2"
+        dest: /tmp/monitoring-values.yaml
+
     - name: Install Prometheus and Grafana
-      shell: |
+      ansible.builtin.shell: |
         helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
-          --namespace monitoring \
+          --namespace {{ monitoring_namespace }} \
           --create-namespace \
-          --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.storageClassName=rook-ceph-block \
-          --set prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage=10Gi \
-          --set grafana.persistence.enabled=true \
-          --set grafana.persistence.storageClassName=rook-ceph-block \
-          --set grafana.persistence.size=5Gi \
-          --set grafana.sidecar.datasources.enabled=true \
-          --set grafana.sidecar.dashboards.enabled=true
+          --values /tmp/monitoring-values.yaml
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
 
-    # ---------------- VERIFY ----------------
-    - name: Check monitoring pods
-      shell: kubectl get pods -n monitoring
+    - name: Wait for Grafana to be ready
+      ansible.builtin.shell: kubectl -n {{ monitoring_namespace }} rollout status deployment/monitoring-grafana --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
-      register: monitoring_pods
       changed_when: false
 
-    - name: Print monitoring pod status
-      debug:
-        var: monitoring_pods.stdout_lines
-
-    - name: Check monitoring PVCs
-      shell: kubectl get pvc -n monitoring
+    - name: Check monitoring status
+      ansible.builtin.shell: |
+        echo "=== Services ==="
+        kubectl get svc -n {{ monitoring_namespace }}
+        echo ""
+        echo "=== Pods ==="
+        kubectl get pods -n {{ monitoring_namespace }}
+        echo ""
+        echo "=== PVCs ==="
+        kubectl get pvc -n {{ monitoring_namespace }}
       environment:
         KUBECONFIG: "{{ kubeconfig }}"
-      register: monitoring_pvcs
+      register: monitoring_status
       changed_when: false
 
-    - name: Print monitoring PVC status
-      debug:
-        var: monitoring_pvcs.stdout_lines
+    - name: Print monitoring status
+      ansible.builtin.debug:
+        var: monitoring_status.stdout_lines
+
+    - name: Print Grafana access URL
+      ansible.builtin.debug:
+        msg: "Grafana should be reachable at http://{{ ansible_host | default(inventory_hostname) }}:{{ grafana_nodeport }}"

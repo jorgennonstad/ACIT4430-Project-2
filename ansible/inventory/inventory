@@ -8,25 +8,25 @@ all:
 
   hosts:
     master:
-      ansible_host: 10.196.245.21
-      ip: 10.196.245.21
-      access_ip: 10.196.245.21
+      ansible_host: 10.196.244.207
+      ip: 10.196.244.207
+      access_ip: 10.196.244.207
       etcd_member_name: etcd1
 
     worker-1:
-      ansible_host: 10.196.242.255
-      ip: 10.196.242.255
-      access_ip: 10.196.242.255
+      ansible_host: 10.196.245.39
+      ip: 10.196.245.39
+      access_ip: 10.196.245.39
 
     worker-2:
-      ansible_host: 10.196.241.122
-      ip: 10.196.241.122
-      access_ip: 10.196.241.122
+      ansible_host: 10.196.241.225
+      ip: 10.196.241.225
+      access_ip: 10.196.241.225
 
     worker-3:
-      ansible_host: 10.196.241.124
-      ip: 10.196.241.124
-      access_ip: 10.196.241.124
+      ansible_host: 10.196.245.33
+      ip: 10.196.245.33
+      access_ip: 10.196.245.33
 
   children:
     kube_control_plane:

@@ -15,4 +15,15 @@
 
     - name: Refresh inventory after Terraform
       meta: refresh_inventory
+      
+    - name: Show Terraform outputs
+      ansible.builtin.command: terraform output
+      args:
+        chdir: "{{ playbook_dir }}/../../terraform"
+      register: terraform_outputs
+      changed_when: false
+
+    - name: Print Terraform outputs
+      ansible.builtin.debug:
+        var: terraform_outputs.stdout_lines
 

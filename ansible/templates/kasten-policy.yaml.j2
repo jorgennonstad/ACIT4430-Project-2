@@ -1,0 +1,16 @@
+apiVersion: config.kio.kasten.io/v1alpha1
+kind: Policy
+metadata:
+  name: backup-{{ backup_namespace }}
+  namespace: {{ kasten_namespace }}
+spec:
+  comment: "Daily backup policy for namespace {{ backup_namespace }}"
+  frequency: "@daily"
+  retention:
+    daily: 7
+    weekly: 4
+  actions:
+    - action: backup
+  selector:
+    matchLabels:
+      k10.kasten.io/appNamespace: {{ backup_namespace }}

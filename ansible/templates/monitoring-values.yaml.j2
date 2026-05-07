@@ -1,0 +1,33 @@
+prometheus:
+  prometheusSpec:
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: {{ storage_class }}
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: {{ prometheus_storage_size }}
+
+grafana:
+  persistence:
+    enabled: true
+    storageClassName: {{ storage_class }}
+    size: {{ grafana_storage_size }}
+
+  adminUser: {{ grafana_admin_user | quote }}
+  adminPassword: {{ grafana_admin_password | quote }}
+
+  sidecar:
+    datasources:
+      enabled: true
+    dashboards:
+      enabled: true
+
+  deploymentStrategy:
+    type: Recreate
+
+  service:
+    type: NodePort
+    nodePort: {{ grafana_nodeport }}

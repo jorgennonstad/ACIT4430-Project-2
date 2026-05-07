@@ -3,17 +3,16 @@
 - [1 Prerequisites](#1-prerequisites)
 - [2 Requirements](#2-requirements)
 - [3 Project Overview](#3-project-overview)
-- [4 How to run the deployment](#4-how-to-run-the-deployment)
-  - [4.1 main.yml](#41-mainyml)
-  - [4.2 Terraform](#42-terraform)
-  - [4.3 Node Preparation](#43-node-preparation)
-  - [4.4 Kubernetes Deployment](#44-kubernetes-deployment)
-  - [4.5 Ceph Storage](#45-ceph-storage)
-  - [4.6 Monitoring](#46-monitoring)
-  - [4.7 Logging](#47-logging)
-  - [4.8 Backup (Kasten K10)](#48-backup-kasten-k10)
-- [5 How to verify](#5-how-to-verify)
-- [6 Folder Structure](#6-folder-structure)
+  - [3.1 Folder Structure](#31-folder-structure)
+- [4 SSH Access](#4-ssh-access)
+- [5 How the Deployment Works](#5-how-the-deployment-works)
+- [6 How to Run](#6-how-to-run)
+  - [6.1 Terraform](#61-terraform)
+  - [6.2 Ansible](#62-ansible)
+- [7 How to Verify](#7-how-to-verify)
+- [8 Accessing Dashboards](#8-accessing-dashboards)
+- [9 Cleanup](#9-cleanup)
+- [10 Architecture & Access](#10-architecture--access)
 
 ---
 
@@ -21,182 +20,247 @@
 
 You need access to the OsloMet network (EduVPN or campus WiFi).
 
-To access the master node, you must add your public SSH key to the server before deployment. After this, you can SSH into the master node using:
+Before deployment, make sure your public SSH key is available so you can connect to the master VM without a password prompt.
 
-```bash
-ssh ubuntu@<MASTER_IP>
-
-Do not share your private SSH key.
-
-2 Requirements
+## 2 Requirements
 
 The system is built as a small Kubernetes infrastructure with the following components:
 
-1 master node (Kubernetes control plane)
-3 worker nodes (Kubernetes workloads + Ceph storage)
-Ubuntu 24.04 LTS on all nodes
-OpenStack as the cloud provider
-Key-based SSH authentication
-Block storage attached to worker nodes for Ceph
+- 1 master node (Kubernetes control plane)
+- 3 worker nodes (Kubernetes workloads + Ceph storage)
+- Ubuntu 24.04 LTS on all nodes
+- OpenStack as the cloud provider
+- Key-based SSH authentication
+- Block storage attached to worker nodes for Ceph
 
 All nodes are automatically provisioned and configured through Terraform and Ansible.
 
-3 Project Overview
+## 3 Project Overview
 
 The project automates full infrastructure deployment from raw cloud resources to a running Kubernetes platform.
 
 The deployment includes:
 
-Infrastructure provisioning with Terraform
-Node preparation with Ansible
-Kubernetes cluster deployment using Kubespray
-Distributed storage using Rook Ceph
-Monitoring stack (Prometheus + Grafana)
-Logging stack (Loki + Promtail)
-Backup system using Kasten K10
+- Infrastructure provisioning with Terraform
+- Node preparation with Ansible
+- Kubernetes cluster deployment using Kubespray
+- Distributed storage using Rook Ceph
+- Monitoring stack (Prometheus + Grafana)
+- Logging stack (Loki + Promtail)
+- Backup system using Kasten K10
 
 The system is fully automated and repeatable. Running the main playbook will rebuild the entire environment from scratch.
 
-4 How to run the deployment
+### 3.1 Folder Structure
 
-All deployment steps are controlled through the main Ansible playbook:
+```text
+Oblig2/
+└── ACIT4430-Project-2/
+    ├── README.md
+    ├── ansible/
+    │   ├── main.yml
+    │   ├── inventory/
+    │   │   └── inventory
+    │   └── plays/
+    │       ├── 01_terraform.yml
+    │       ├── 02_prepare_nodes.yml
+    │       ├── 03_kubespray.yml
+    │       ├── 04_ceph_rook.yml
+    │       ├── 05_monitoring.yml
+    │       ├── 06_logging.yml
+    │       ├── 07_backup.yml
+    │       └── 08_cleanup.yml
+    ├── terraform/
+    │   └── CreateVM.tf
+    └── kubespray/
+```
 
-ansible-playbook main.yml
+## 4 SSH Access
 
-This executes all stages in order.
+Master VM IP: `10.196.241.251`
 
-4.1 main.yml
+Before you run the deployment, add your public SSH key to the master VM.
 
-The main playbook runs the full deployment pipeline:
+```bash
+ssh-copy-id ubuntu@10.196.241.251
+```
 
-Terraform provisioning
-Node preparation
-Kubernetes cluster deployment
-Ceph storage setup
-Monitoring installation
-Logging installation
-Backup system installation
+You can test the connection directly with:
 
-Each stage is separated into its own playbook for clarity and maintainability.
+```bash
+ssh ubuntu@10.196.241.251
+```
 
-4.2 Terraform
+## 5 How the Deployment Works
 
-Terraform is used to create all infrastructure in OpenStack.
+The deployment is split into a few stages:
 
-It provisions:
+- Terraform creates the OpenStack infrastructure and inventory.
+- Ansible prepares the nodes and installs Kubernetes.
+- Kubespray brings up the cluster.
+- Rook Ceph provides storage.
+- Monitoring, logging, and backup are installed on top.
 
-Master node
-Worker nodes
-Block storage volumes
-Network configuration
-Dynamic Ansible inventory
+The main Ansible playbook is the entry point for the full setup. It runs the stage playbooks in order so the cluster is built from scratch in a repeatable way.
 
-Run manually if needed:
+## 6 How to Run
 
-cd terraform
+The deployment is normally run from Ansible and will call Terraform as needed; you do not need to run Terraform manually unless debugging infrastructure.
+
+All verification commands below should be run from the master node and prefixed with `sudo` (for example `sudo kubectl get nodes`).
+
+### 6.1 Terraform (infrastructure)
+
+Terraform provisions the OpenStack infrastructure used by the project:
+
+- Master node
+- Worker nodes
+- Block storage volumes
+- Network configuration
+- Dynamic Ansible inventory
+
+If you need to run Terraform manually (not required for a normal run):
+
+```bash
+cd Oblig2/ACIT4430-Project-2/terraform
 terraform init
 terraform apply
-4.3 Node Preparation
+```
 
-This step prepares all nodes for Kubernetes.
+### 6.2 Ansible (full deployment)
 
-It:
+Run the full deployment from the Ansible folder using the provided inventory. This will perform node prep, Kubespray (Kubernetes), Rook-Ceph, monitoring, logging and Kasten K10 steps.
 
-Waits for SSH availability
-Disables swap
-Loads required kernel modules
-Installs base packages
-Configures Kubernetes networking
-Wipes old Ceph disk data on worker nodes
+```bash
+cd Oblig2/ACIT4430-Project-2/ansible
+ansible-playbook -i inventory/inventory main.yml
+```
 
-This ensures all nodes are in a consistent state before cluster deployment.
+The Ansible run is the normal way to deploy everything — Terraform is invoked by the playbooks when needed, so manual Terraform is optional.
 
-4.4 Kubernetes Deployment
+## 7 How to Verify
 
-Kubernetes is installed using Kubespray.
+SSH to the master node and run the following checks with `sudo`.
 
-It:
+### 7.1 Cluster nodes
 
-Generates cluster inventory
-Installs Kubernetes components on all nodes
-Configures control plane and workers
-Initializes cluster networking
+Verify all nodes are present and `Ready`:
 
-Result:
+```bash
+sudo kubectl get nodes
+```
 
-1 control plane node
-3 worker nodes
-4.5 Ceph Storage
+Expected: one master and three workers in `Ready` state.
 
-Rook Ceph is deployed inside Kubernetes.
+### 7.2 All pods
 
-It:
+Check there are no CrashLoopBackOff / Pending / Error pods:
 
-Uses worker node disks
-Creates a distributed storage cluster
-Enables replication and fault tolerance
-Provides dynamic storage provisioning via StorageClass
-4.6 Monitoring
+```bash
+sudo kubectl get pods -A
+```
 
-The monitoring stack includes:
+### 7.3 Storage (Rook-Ceph)
 
-Prometheus (metrics collection)
-Grafana (visualization)
+```bash
+sudo kubectl get pods -n rook-ceph
+sudo kubectl -n rook-ceph get cephcluster
+```
 
-It is installed using Helm and stores data in Ceph-backed storage.
+`CephCluster` should show `HEALTH_OK` and pods should be `Running` / `Completed`.
 
-4.7 Logging
+### 7.4 Monitoring
 
-The logging stack includes:
+```bash
+sudo kubectl get pods -n monitoring
+sudo kubectl get pvc -n monitoring
+```
 
-Loki (log storage)
-Promtail (log collection)
+Pods should be `Running` and PVCs `Bound`.
 
-Logs from all containers are centralized and accessible through Grafana.
+### 7.5 Logging
 
-4.8 Backup (Kasten K10)
+```bash
+sudo kubectl get pods -n logging
+sudo kubectl get pvc -n logging
+```
 
-Kasten K10 is used for Kubernetes backups.
+Pods should be `Running` and PVCs `Bound`.
 
-It:
+### 7.6 Backup (Kasten K10)
 
-Creates snapshot-based backups using Ceph
-Uses backup policies per namespace
-Supports scheduled and on-demand backups
-Provides recovery capabilities for workloads and data
-5 How to verify
+```bash
+sudo kubectl get pods -n kasten-io
+sudo kubectl get pvc -n kasten-io
+sudo kubectl get applications.apps.kio.kasten.io -A
+sudo kubectl get policies.config.kio.kasten.io -n kasten-io
+```
 
-After deployment, you can verify the system using:
+Pods should be `Running`. `applications.apps.kio.kasten.io` should list protected namespaces (for example `default`, `monitoring`, `logging`) and policies should report status.
 
-kubectl get nodes
-kubectl get pods -A
+You can also inspect namespaces and workloads:
 
-Check specific components:
+```bash
+sudo kubectl get ns
+sudo kubectl get pods -A
+```
 
-kubectl get pods -n rook-ceph
-kubectl get pods -n monitoring
-kubectl get pods -n logging
-kubectl get pods -n kasten-io
+## 8 Accessing Dashboards
 
-To verify Ceph:
+Both dashboards are exposed and can be acessed as long as you are connected to the OsloMet nettwork
 
-kubectl -n rook-ceph get cephcluster
+### 8.1 Grafana (Monitoring)
 
-To verify Kasten:
+Open in your browser:
 
-kubectl get policies.config.kio.kasten.io -n kasten-io
-6 Folder Structure
-[INSERT PROJECT FOLDER TREE HERE]
-Access Notes
+```
+http://{master-node-ip}:30080
+```
 
-To access services:
+Login with username & password `admin`.
 
-Kubernetes API: master node
-Grafana: via port-forward
-Kasten dashboard: via port-forward
-Loki: integrated in Grafana
+**What to look for:**
+- Dashboards panel on the left; browse to "Kubernetes / Compute Resources" or similar to see cluster metrics.
+- Check that nodes, pods, CPU, and memory usage are being recorded.
+- Prometheus should be listed under "Data Sources".
 
-Example:
+**Optional: Access Prometheus directly from Grafana**
 
-kubectl -n monitoring port-forward svc/grafana 3000:80
-kubectl -n kasten-io port-forward svc/gateway 8080:80
+Inside Grafana, go to **Explore** → select **Prometheus** data source. You can run queries like:
+
+```
+node_memory_MemAvailable_bytes
+kubernetes_build_info
+```
+
+### 8.2 Kasten K10 (Backup)
+
+Open in your browser:
+
+```
+http://{master-node-ip}:30808/k10/#
+```
+
+**What to look for:**
+- **Applications:** You should see `default`, `monitoring`, `logging` and `rook-ceph` listed.
+- **Policies:** Check that backup policies exist for each namespace (daily backups, 7-day retention).
+- **Dashboard:** Verify that the policy status shows active/enabled and ready to back up applications.
+
+## 9 Cleanup
+
+When you want to remove the stack, run the cleanup playbook from the Ansible directory:
+
+```bash
+cd Oblig2/ACIT4430-Project-2/ansible
+ansible-playbook -i inventory/inventory plays/08_cleanup.yml
+```
+
+## 10 Architecture & Access
+
+**Dashboards:**
+- **Grafana:** http://{master-node-ip}:30080/ — Monitoring, metrics, Prometheus queries, Loki logs.
+- **Kasten K10:** http://{master-node-ip}:30808/k10/# — Backup applications, policies, snapshots.
+
+**Kubernetes API:** master node via `kubectl` with `/etc/kubernetes/admin.conf`.
+
+**Storage:** Rook Ceph distributed across worker nodes (block storage for PVCs and snapshots).
